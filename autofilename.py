@@ -1,6 +1,7 @@
 import sublime
 import sublime_plugin
 import os
+import json
 from getimageinfo import getImageInfo
 
 class InsertDimensionsCommand(sublime_plugin.TextCommand):
@@ -106,8 +107,8 @@ class FileNameComplete(sublime_plugin.EventListener):
     def get_cur_path(self,view,sel):
         scope_contents = view.substr(view.extract_scope(sel-1))
         cur_path = scope_contents.replace('\r\n', '\n').split('\n')[0]
-        if cur_path.startswith(("'","\"","(")):
-            cur_path = cur_path[1:-1]
+        if cur_path.startswith(("'","\"","(", "/")):
+            cur_path = cur_path[2:-1] if '/' in cur_path[1] else cur_path[1:-1]
 
         return cur_path[:cur_path.rfind('/')+1] if '/' in cur_path else ''
 
@@ -116,6 +117,56 @@ class FileNameComplete(sublime_plugin.EventListener):
             return view.settings().get(string)
         else:
             return sublime.load_settings('autofilename.sublime-settings').get(string)
+
+    def get_resources_path(self, view, path, name):
+        try:
+            settings_full_path = self.find_recursive(path, name)
+            resources_path = self.parse_settings(view, settings_full_path)
+            absolute_path = self.to_absolute(os.path.dirname(settings_full_path), resources_path)
+            return absolute_path
+        except AttributeError:
+            return False
+
+    def find_recursive(self, path, name):
+        full_path = os.path.join(path, name)
+        is_file = os.path.isfile(full_path)
+        if not is_file:
+            return self.find_recursive(os.path.split(path)[0], name) if name != full_path[1:] else False
+        return full_path
+
+    def parse_settings(self, view, path):
+        try:
+            with open(path, 'r') as json_config:
+                return json.load(json_config)[self.get_setting('afn_resources_param',view)]
+        except KeyError:
+                return False
+
+
+    def to_absolute(self, settings_path, resources_path):
+        # absolute or relative path without leading slash
+        mixed_path = os.path.join(settings_path, self.process_path(resources_path))
+
+        # relative to settings root
+        if any(divider in resources_path for divider in ('..', '.')) or not resources_path:
+            absolute_path = os.path.normpath(mixed_path)
+        # absolute to settings root
+        elif os.path.isdir(mixed_path):
+            absolute_path = mixed_path
+        # absolute to system root
+        else:
+            absolute_path = resources_path
+
+        return absolute_path
+
+    def process_path(self, path):
+        # if return '/', os.path.join in to_absolute function
+        # replace settings path with '/', strange behaviour
+        if not path or path == '/':
+            return ''
+        path = path[1:] if path.startswith('/') else path
+        path = path + '/' if not path.endswith('/') else path
+        return path
+
 
     def on_query_completions(self, view, prefix, locations):
         is_proj_rel = self.get_setting('afn_use_project_root',view)
@@ -128,16 +179,22 @@ class FileNameComplete(sublime_plugin.EventListener):
 
         cur_path = self.get_cur_path(view, sel)
 
-        if is_proj_rel:
-            this_dir = self.get_setting('afn_proj_root',view)
-            if len(this_dir) < 2:
-                for f in sublime.active_window().folders():
-                    if f in view.file_name():
-                        this_dir = f
-        else:
-            if not view.file_name():
-                return
-            this_dir = os.path.split(view.file_name())[0]
+        cur_dir = os.path.dirname(sublime.active_window().active_view().file_name())
+        settings_file = self.get_setting('afn_resources_file', view)
+
+        this_dir = self.get_resources_path(view, cur_dir, settings_file)
+
+        if not this_dir:
+            if is_proj_rel:
+                this_dir = self.get_setting('afn_proj_root',view)
+                if len(this_dir) < 2:
+                    for f in sublime.active_window().folders():
+                        if f in view.file_name():
+                            this_dir = f
+            else:
+                if not view.file_name():
+                    return
+                this_dir = os.path.split(view.file_name())[0]
 
         this_dir = os.path.join(this_dir, cur_path)
 
@@ -153,5 +210,5 @@ class FileNameComplete(sublime_plugin.EventListener):
                 InsertDimensionsCommand.this_dir = this_dir
             return completions
         except OSError:
-            print "AutoFileName: could not find " + this_dir
+            # print "AutoFileName: could not find " + this_dir
             return
